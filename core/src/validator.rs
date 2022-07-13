@@ -758,7 +758,13 @@ impl Validator {
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
         let connection_cache = match use_quic {
-            true => Arc::new(ConnectionCache::new(tpu_connection_pool_size)),
+            true => {
+                let mut connection_cache = ConnectionCache::new(tpu_connection_pool_size);
+                connection_cache
+                    .update_client_certificate(&identity_keypair, node.info.gossip.ip())
+                    .expect("Failed to update QUIC client certificates");
+                Arc::new(connection_cache)
+            }
             false => Arc::new(ConnectionCache::with_udp(tpu_connection_pool_size)),
         };
 
@@ -982,6 +988,7 @@ impl Validator {
             block_metadata_notifier,
             config.wait_to_vote_slot,
             accounts_background_request_sender,
+            config.runtime_config.log_messages_bytes_limit,
             &connection_cache,
         );
 
@@ -1028,6 +1035,7 @@ impl Validator {
             &cost_model,
             &connection_cache,
             &identity_keypair,
+            config.runtime_config.log_messages_bytes_limit,
             enable_quic_servers,
         );
 

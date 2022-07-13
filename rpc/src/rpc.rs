@@ -1739,24 +1739,24 @@ impl JsonRpcRequestProcessor {
             .state()
             .map_err(|_| Error::invalid_params("Invalid param: not a stake account".to_string()))?;
         let delegation = stake_state.delegation();
-        if delegation.is_none() {
-            match stake_state.meta() {
-                None => {
-                    return Err(Error::invalid_params(
-                        "Invalid param: stake account not initialized".to_string(),
-                    ));
-                }
-                Some(meta) => {
-                    let rent_exempt_reserve = meta.rent_exempt_reserve;
-                    return Ok(RpcStakeActivation {
-                        state: StakeActivationState::Inactive,
-                        active: 0,
-                        inactive: stake_account.lamports().saturating_sub(rent_exempt_reserve),
-                    });
-                }
+
+        let rent_exempt_reserve = stake_state
+            .meta()
+            .ok_or_else(|| {
+                Error::invalid_params("Invalid param: stake account not initialized".to_string())
+            })?
+            .rent_exempt_reserve;
+
+        let delegation = match delegation {
+            None => {
+                return Ok(RpcStakeActivation {
+                    state: StakeActivationState::Inactive,
+                    active: 0,
+                    inactive: stake_account.lamports().saturating_sub(rent_exempt_reserve),
+                })
             }
-        }
-        let delegation = delegation.unwrap();
+            Some(delegation) => delegation,
+        };
 
         let stake_history_account = bank
             .get_account(&stake_history::id())
@@ -1782,8 +1782,12 @@ impl JsonRpcRequestProcessor {
         let inactive_stake = match stake_activation_state {
             StakeActivationState::Activating => activating,
             StakeActivationState::Active => 0,
-            StakeActivationState::Deactivating => delegation.stake.saturating_sub(effective),
-            StakeActivationState::Inactive => delegation.stake,
+            StakeActivationState::Deactivating => stake_account
+                .lamports()
+                .saturating_sub(effective + rent_exempt_reserve),
+            StakeActivationState::Inactive => {
+                stake_account.lamports().saturating_sub(rent_exempt_reserve)
+            }
         };
         Ok(RpcStakeActivation {
             state: stake_activation_state,
@@ -4892,13 +4896,12 @@ pub mod tests {
                     slot,
                 ));
 
-            let mut new_block_commitment = BlockCommitmentCache::new(
+            let new_block_commitment = BlockCommitmentCache::new(
                 HashMap::new(),
                 0,
                 CommitmentSlots::new_from_slot(self.bank_forks.read().unwrap().highest_slot()),
             );
-            let mut w_block_commitment_cache = self.block_commitment_cache.write().unwrap();
-            std::mem::swap(&mut *w_block_commitment_cache, &mut new_block_commitment);
+            *self.block_commitment_cache.write().unwrap() = new_block_commitment;
             bank
         }
 
