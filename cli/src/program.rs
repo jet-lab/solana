@@ -1,3 +1,5 @@
+use solana_client::tpu_client::SendMessagesConfig;
+
 use {
     crate::{
         checks::*,
@@ -72,6 +74,8 @@ pub enum ProgramCliCommand {
         max_len: Option<usize>,
         allow_excessive_balance: bool,
         skip_fee_check: bool,
+        expired_blockhash_retries: Option<usize>,
+        resume_start_index: Option<usize>,
     },
     WriteBuffer {
         program_location: String,
@@ -80,6 +84,8 @@ pub enum ProgramCliCommand {
         buffer_authority_signer_index: Option<SignerIndex>,
         max_len: Option<usize>,
         skip_fee_check: bool,
+        expired_blockhash_retries: Option<usize>,
+        resume_start_index: Option<usize>,
     },
     SetBufferAuthority {
         buffer_pubkey: Pubkey,
@@ -181,6 +187,22 @@ impl ProgramSubCommands for App<'_, '_> {
                                 .long("allow-excessive-deploy-account-balance")
                                 .takes_value(false)
                                 .help("Use the designated program id even if the account already holds a large balance of SOL")
+                        )
+                        .arg(
+                            Arg::with_name("expired_blockhash_retries")
+                                .long("expired-blockhash-retries")
+                                .value_name("expired_blockhash_retries")
+                                .takes_value(true)
+                                .required(false)
+                                .help("number of expired blockhashes to permit while retrying deployment before giving up")
+                        )
+                        .arg(
+                            Arg::with_name("resume_start_index")
+                                .long("resume-start-index")
+                                .value_name("resume_start_index")
+                                .takes_value(true)
+                                .required(false)
+                                .help("If resuming a prior deployment, specify which message index to begin with")
                         ),
                 )
                 .subcommand(
@@ -218,6 +240,22 @@ impl ProgramSubCommands for App<'_, '_> {
                                 .required(false)
                                 .help("Maximum length of the upgradeable program \
                                       [default: twice the length of the original deployed program]")
+                        )
+                        .arg(
+                            Arg::with_name("expired_blockhash_retries")
+                                .long("expired-blockhash-retries")
+                                .value_name("expired_blockhash_retries")
+                                .takes_value(true)
+                                .required(false)
+                                .help("number of expired blockhashes to permit while retrying deployment before giving up")
+                        )
+                        .arg(
+                            Arg::with_name("resume_start_index")
+                                .long("resume-start-index")
+                                .value_name("resume_start_index")
+                                .takes_value(true)
+                                .required(false)
+                                .help("If resuming a prior deployment, specify which message index to begin with")
                         ),
                 )
                 .subcommand(
@@ -485,6 +523,18 @@ pub fn parse_program_subcommand(
                     )
                 };
 
+            let expired_blockhash_retries = matches
+                .value_of("expired_blockhash_retries")
+                .map(usize::from_str)
+                .transpose()
+                .map_err(|i| CliError::BadParameter(format!("invalid expired_blockhash_retries: {}", i)))?;
+
+            let resume_start_index = matches
+                .value_of("resume_start_index")
+                .map(usize::from_str)
+                .transpose()
+                .map_err(|i| CliError::BadParameter(format!("invalid resume_start_index: {}", i)))?;
+
             let max_len = value_of(matches, "max_len");
 
             let signer_info =
@@ -504,6 +554,8 @@ pub fn parse_program_subcommand(
                     max_len,
                     allow_excessive_balance: matches.is_present("allow_excessive_balance"),
                     skip_fee_check,
+                    expired_blockhash_retries,
+                    resume_start_index,
                 }),
                 signers: signer_info.signers,
             }
@@ -541,6 +593,18 @@ pub fn parse_program_subcommand(
             let signer_info =
                 default_signer.generate_unique_signers(bulk_signers, matches, wallet_manager)?;
 
+            let expired_blockhash_retries = matches
+                .value_of("expired_blockhash_retries")
+                .map(usize::from_str)
+                .transpose()
+                .map_err(|i| CliError::BadParameter(format!("invalid expired_blockhash_retries: {}", i)))?;
+
+            let resume_start_index = matches
+                .value_of("resume_start_index")
+                .map(usize::from_str)
+                .transpose()
+                .map_err(|i| CliError::BadParameter(format!("invalid resume_start_index: {}", i)))?;
+
             CliCommandInfo {
                 command: CliCommand::Program(ProgramCliCommand::WriteBuffer {
                     program_location: matches.value_of("program_location").unwrap().to_string(),
@@ -550,6 +614,8 @@ pub fn parse_program_subcommand(
                         .index_of_or_none(buffer_authority_pubkey),
                     max_len,
                     skip_fee_check,
+                    expired_blockhash_retries,
+                    resume_start_index,
                 }),
                 signers: signer_info.signers,
             }
@@ -699,6 +765,8 @@ pub fn process_program_subcommand(
             max_len,
             allow_excessive_balance,
             skip_fee_check,
+            expired_blockhash_retries,
+            resume_start_index,
         } => process_program_deploy(
             rpc_client,
             config,
@@ -712,6 +780,8 @@ pub fn process_program_subcommand(
             *max_len,
             *allow_excessive_balance,
             *skip_fee_check,
+            *expired_blockhash_retries,
+            *resume_start_index,
         ),
         ProgramCliCommand::WriteBuffer {
             program_location,
@@ -720,6 +790,8 @@ pub fn process_program_subcommand(
             buffer_authority_signer_index,
             max_len,
             skip_fee_check,
+            expired_blockhash_retries,
+            resume_start_index,
         } => process_write_buffer(
             rpc_client,
             config,
@@ -729,6 +801,8 @@ pub fn process_program_subcommand(
             *buffer_authority_signer_index,
             *max_len,
             *skip_fee_check,
+            *expired_blockhash_retries,
+            *resume_start_index,
         ),
         ProgramCliCommand::SetBufferAuthority {
             buffer_pubkey,
@@ -827,6 +901,8 @@ fn process_program_deploy(
     max_len: Option<usize>,
     allow_excessive_balance: bool,
     skip_fee_check: bool,
+    expired_blockhash_retries: Option<usize>,
+    resume_start_index: Option<usize>,
 ) -> ProcessResult {
     let (words, mnemonic, buffer_keypair) = create_ephemeral_keypair()?;
     let (buffer_provided, buffer_signer, buffer_pubkey) = if let Some(i) = buffer_signer_index {
@@ -1010,6 +1086,8 @@ fn process_program_deploy(
             Some(upgrade_authority_signer),
             allow_excessive_balance,
             skip_fee_check,
+            expired_blockhash_retries,
+            resume_start_index,
         )
     } else {
         do_process_program_upgrade(
@@ -1021,6 +1099,8 @@ fn process_program_deploy(
             &buffer_pubkey,
             buffer_signer,
             skip_fee_check,
+            expired_blockhash_retries,
+            resume_start_index,
         )
     };
     if result.is_ok() && is_final {
@@ -1048,6 +1128,8 @@ fn process_write_buffer(
     buffer_authority_signer_index: Option<SignerIndex>,
     max_len: Option<usize>,
     skip_fee_check: bool,
+    expired_blockhash_retries: Option<usize>,
+    resume_start_index: Option<usize>,
 ) -> ProcessResult {
     // Create ephemeral keypair to use for Buffer account, if not provided
     let (words, mnemonic, buffer_keypair) = create_ephemeral_keypair()?;
@@ -1116,6 +1198,8 @@ fn process_write_buffer(
         Some(buffer_authority),
         true,
         skip_fee_check,
+        expired_blockhash_retries,
+        resume_start_index,
     );
 
     if result.is_err() && buffer_signer_index.is_none() && buffer_signer.is_some() {
@@ -1682,6 +1766,8 @@ pub fn process_deploy(
     use_deprecated_loader: bool,
     allow_excessive_balance: bool,
     skip_fee_check: bool,
+    expired_blockhash_retries: Option<usize>,
+    resume_start_index: Option<usize>,
 ) -> ProcessResult {
     // Create ephemeral keypair to use for Buffer account, if not provided
     let (words, mnemonic, buffer_keypair) = create_ephemeral_keypair()?;
@@ -1713,6 +1799,8 @@ pub fn process_deploy(
         Some(buffer_signer),
         allow_excessive_balance,
         skip_fee_check,
+        expired_blockhash_retries,
+        resume_start_index,
     );
     if result.is_err() && buffer_signer_index.is_none() {
         report_ephemeral_mnemonic(words, mnemonic);
@@ -1752,6 +1840,8 @@ fn do_process_program_write_and_deploy(
     buffer_authority_signer: Option<&dyn Signer>,
     allow_excessive_balance: bool,
     skip_fee_check: bool,
+    expired_blockhash_retries: Option<usize>,
+    resume_start_index: Option<usize>,
 ) -> ProcessResult {
     // Build messages to calculate fees
     let mut messages: Vec<&Message> = Vec::new();
@@ -1902,6 +1992,8 @@ fn do_process_program_write_and_deploy(
         buffer_signer,
         buffer_authority_signer,
         program_signers,
+        expired_blockhash_retries,
+        resume_start_index,
     )?;
 
     if let Some(program_signers) = program_signers {
@@ -1926,6 +2018,8 @@ fn do_process_program_upgrade(
     buffer_pubkey: &Pubkey,
     buffer_signer: Option<&dyn Signer>,
     skip_fee_check: bool,
+    expired_blockhash_retries: Option<usize>,
+    resume_start_index: Option<usize>,
 ) -> ProcessResult {
     let loader_id = bpf_loader_upgradeable::id();
     let data_len = program_data.len();
@@ -2046,6 +2140,8 @@ fn do_process_program_upgrade(
         buffer_signer,
         Some(upgrade_authority),
         Some(&[upgrade_authority]),
+        expired_blockhash_retries,
+        resume_start_index,
     )?;
 
     let program_id = CliProgramId {
@@ -2175,6 +2271,8 @@ fn send_deploy_messages(
     initial_signer: Option<&dyn Signer>,
     write_signer: Option<&dyn Signer>,
     final_signers: Option<&[&dyn Signer]>,
+    expired_blockhash_retries: Option<usize>,
+    resume_start_index: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let payer_signer = config.signers[0];
 
@@ -2211,10 +2309,18 @@ fn send_deploy_messages(
                 TpuClientConfig::default(),
                 connection_cache,
             )?;
+            let mut config = SendMessagesConfig::default();
+            if let Some(retries) = expired_blockhash_retries {
+                config.expired_blockhash_retries = retries;
+            }
             let transaction_errors = tpu_client
                 .send_and_confirm_messages_with_spinner(
-                    write_messages,
+                    match resume_start_index {
+                        Some(start) => &write_messages[start..],
+                        None => write_messages,
+                    },
                     &[payer_signer, write_signer],
+                    config
                 )
                 .map_err(|err| format!("Data writes to account failed: {}", err))?
                 .into_iter()
@@ -2346,6 +2452,8 @@ mod tests {
                     max_len: None,
                     allow_excessive_balance: false,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![read_keypair_file(&keypair_file).unwrap().into()],
             }
@@ -2373,6 +2481,8 @@ mod tests {
                     max_len: Some(42),
                     allow_excessive_balance: false,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![read_keypair_file(&keypair_file).unwrap().into()],
             }
@@ -2402,6 +2512,8 @@ mod tests {
                     max_len: None,
                     allow_excessive_balance: false,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![
                     read_keypair_file(&keypair_file).unwrap().into(),
@@ -2433,6 +2545,8 @@ mod tests {
                     max_len: None,
                     allow_excessive_balance: false,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![read_keypair_file(&keypair_file).unwrap().into()],
             }
@@ -2463,6 +2577,8 @@ mod tests {
                     max_len: None,
                     allow_excessive_balance: false,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![
                     read_keypair_file(&keypair_file).unwrap().into(),
@@ -2496,6 +2612,8 @@ mod tests {
                     max_len: None,
                     allow_excessive_balance: false,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![
                     read_keypair_file(&keypair_file).unwrap().into(),
@@ -2524,6 +2642,8 @@ mod tests {
                     is_final: true,
                     max_len: None,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                     allow_excessive_balance: false,
                 }),
                 signers: vec![read_keypair_file(&keypair_file).unwrap().into()],
@@ -2558,6 +2678,8 @@ mod tests {
                     buffer_authority_signer_index: Some(0),
                     max_len: None,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![read_keypair_file(&keypair_file).unwrap().into()],
             }
@@ -2582,6 +2704,8 @@ mod tests {
                     buffer_authority_signer_index: Some(0),
                     max_len: Some(42),
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![read_keypair_file(&keypair_file).unwrap().into()],
             }
@@ -2609,6 +2733,8 @@ mod tests {
                     buffer_authority_signer_index: Some(0),
                     max_len: None,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![
                     read_keypair_file(&keypair_file).unwrap().into(),
@@ -2639,6 +2765,8 @@ mod tests {
                     buffer_authority_signer_index: Some(1),
                     max_len: None,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![
                     read_keypair_file(&keypair_file).unwrap().into(),
@@ -2674,6 +2802,8 @@ mod tests {
                     buffer_authority_signer_index: Some(2),
                     max_len: None,
                     skip_fee_check: false,
+                    expired_blockhash_retries: None,
+                    resume_start_index: None,
                 }),
                 signers: vec![
                     read_keypair_file(&keypair_file).unwrap().into(),
@@ -3117,6 +3247,8 @@ mod tests {
                 max_len: None,
                 allow_excessive_balance: false,
                 skip_fee_check: false,
+                expired_blockhash_retries: None,
+                resume_start_index: None,
             }),
             signers: vec![&default_keypair],
             output_format: OutputFormat::JsonCompact,

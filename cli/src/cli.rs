@@ -1050,6 +1050,8 @@ pub fn process_command(config: &CliConfig) -> ProcessResult {
             *use_deprecated_loader,
             *allow_excessive_balance,
             *skip_fee_check,
+            None,
+            None,
         ),
         CliCommand::Program(program_subcommand) => {
             process_program_subcommand(rpc_client, config, program_subcommand)
