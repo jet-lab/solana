@@ -175,8 +175,9 @@ impl TpuClient {
         &self,
         messages: &[Message],
         signers: &T,
+        config: SendMessagesConfig,
     ) -> Result<Vec<Option<TransactionError>>> {
-        let mut expired_blockhash_retries = 5;
+        let mut expired_blockhash_retries = config.expired_blockhash_retries;
 
         let progress_bar = spinner::new_progress_bar();
         progress_bar.set_message("Setting up...");
@@ -202,12 +203,12 @@ impl TpuClient {
                 pending_transactions.insert(transaction.signatures[0], (i, transaction));
             }
 
-            let mut last_resend = Instant::now() - TRANSACTION_RESEND_INTERVAL;
+            let mut last_resend = Instant::now() - config.transaction_resend_interval;
             while block_height <= last_valid_block_height {
                 let num_transactions = pending_transactions.len();
 
                 // Periodically re-send all pending transactions
-                if Instant::now().duration_since(last_resend) > TRANSACTION_RESEND_INTERVAL {
+                if Instant::now().duration_since(last_resend) > config.transaction_resend_interval {
                     for (index, (_i, transaction)) in pending_transactions.values().enumerate() {
                         if !self.send_transaction(transaction) {
                             let _result = self.rpc_client.send_transaction(transaction).ok();
@@ -220,7 +221,7 @@ impl TpuClient {
                             last_valid_block_height,
                             &format!("Sending {}/{} transactions", index + 1, num_transactions,),
                         );
-                        sleep(SEND_TRANSACTION_INTERVAL);
+                        sleep(config.send_transaction_interval);
                     }
                     last_resend = Instant::now();
                 }
@@ -294,11 +295,36 @@ impl TpuClient {
             ));
             expired_blockhash_retries -= 1;
         }
+        println!("try again from index {} to continue", confirmed_transactions);
         Err(TpuSenderError::Custom("Max retries exceeded".into()))
     }
 
     pub fn rpc_client(&self) -> &RpcClient {
         &self.rpc_client
+    }
+}
+
+/// To ensure your code has forwards compatibility, use like so:
+/// SendMessagesConfig {
+///     field_you_care_about: value,
+///     ..Default::default()
+/// }
+/// or
+/// let config = SendMessagesConfig::default();
+/// config.field_you_care_about = value;
+pub struct SendMessagesConfig {
+    pub expired_blockhash_retries: usize,
+    pub transaction_resend_interval: Duration,
+    pub send_transaction_interval: Duration,
+}
+
+impl Default for SendMessagesConfig {
+    fn default() -> Self {
+        Self {
+            expired_blockhash_retries: 5,
+            transaction_resend_interval: TRANSACTION_RESEND_INTERVAL,
+            send_transaction_interval: SEND_TRANSACTION_INTERVAL,
+        }
     }
 }
 
